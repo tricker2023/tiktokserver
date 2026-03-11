@@ -1,0 +1,12 @@
+{
+  "name": "tiktok-user-info",
+  "version": "1.0.0",
+  "description": "TikTok user profile proxy for bot tracking",
+  "main": "api/tiktok.js",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  }
+}

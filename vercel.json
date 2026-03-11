@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "name": "tiktok-user-info",
+  "builds": [
+    {
+      "src": "api/tiktok.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/tiktok",
+      "dest": "/api/tiktok.js"
+    },
+    {
+      "src": "/",
+      "dest": "/api/tiktok.js"
+    }
+  ],
+  "functions": {
+    "api/tiktok.js": {
+      "maxDuration": 15
+    }
+  }
+}
