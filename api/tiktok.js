@@ -1,103 +1,77 @@
 const https = require("https");
-const zlib = require("zlib");
 
-const USER_AGENTS = [
-  "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-  "Mozilla/5.0 (Linux; Android 11; Redmi Note 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36",
-  "Mozilla/5.0 (Linux; Android 12; SM-A325F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
-  "Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-];
-
-function randomUA() {
-  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-}
-
-function fetchPage(url, redirectCount = 0) {
+function httpsGet(url, headers) {
   return new Promise((resolve, reject) => {
-    if (redirectCount > 5) return reject(new Error("Too many redirects"));
-
-    const options = {
-      headers: {
-        "User-Agent": randomUA(),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "vi-VN,vi;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "sec-fetch-dest": "document",
-        "sec-fetch-mode": "navigate",
-        "sec-fetch-site": "none",
-        "sec-fetch-user": "?1",
-        "upgrade-insecure-requests": "1",
-        "Cache-Control": "no-cache",
-      },
-      timeout: 12000,
-    };
-
-    const req = https.get(url, options, (res) => {
-      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
-        const newUrl = res.headers.location.startsWith("http")
-          ? res.headers.location
-          : `https://www.tiktok.com${res.headers.location}`;
-        res.resume();
-        return resolve(fetchPage(newUrl, redirectCount + 1));
-      }
-
-      let stream = res;
-      const encoding = res.headers["content-encoding"] || "";
-      if (encoding.includes("gzip")) {
-        stream = res.pipe(zlib.createGunzip());
-      } else if (encoding.includes("deflate")) {
-        stream = res.pipe(zlib.createInflate());
-      } else if (encoding.includes("br")) {
-        stream = res.pipe(zlib.createBrotliDecompress());
-      }
-
+    const req = https.get(url, { headers, timeout: 12000 }, (res) => {
       const chunks = [];
-      stream.on("data", (chunk) => chunks.push(chunk));
-      stream.on("end", () => {
-        const html = Buffer.concat(chunks).toString("utf-8");
-        resolve({ statusCode: res.statusCode, html });
-      });
-      stream.on("error", reject);
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf-8") }));
+      res.on("error", reject);
     });
-
-    req.on("timeout", () => { req.destroy(); reject(new Error("Request timed out")); });
+    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
     req.on("error", reject);
   });
 }
 
 module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-
   if (req.method === "OPTIONS") return res.status(200).end();
 
   const username = (req.query.input || "").trim().replace(/^@/, "");
-  if (!username) {
-    return res.status(400).json({ error: "Missing ?input=username" });
-  }
+  if (!username) return res.status(400).json({ error: "Missing ?input=username" });
 
   try {
-    const url = `https://www.tiktok.com/@${username}`;
-    const { statusCode, html } = await fetchPage(url);
+    const apiUrl = `https://www.tiktok.com/api/user/detail/?uniqueId=${encodeURIComponent(username)}&aid=1988&app_language=vi&device_platform=web_pc`;
 
-    if (statusCode === 404) {
-      return res.status(200).send(`<html><body>{"error":"User not found","statusCode":404}</body></html>`);
-    }
+    const { status, body } = await httpsGet(apiUrl, {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Accept": "application/json, text/plain, */*",
+      "Accept-Language": "vi-VN,vi;q=0.9",
+      "Referer": "https://www.tiktok.com/",
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-origin",
+    });
 
-    if (statusCode !== 200) {
-      return res.status(502).json({ error: `TikTok returned HTTP ${statusCode}` });
-    }
+    if (status !== 200) return res.status(502).json({ error: `TikTok API returned HTTP ${status}` });
 
-    const hasUserInfo = html.includes('"userInfo"') || html.includes('"uniqueId"');
-    if (!hasUserInfo) {
-      return res.status(503).json({ error: "No userInfo in response", hint: "Captcha or block" });
-    }
+    let data;
+    try { data = JSON.parse(body); } catch { return res.status(503).json({ error: "Invalid JSON from TikTok" }); }
 
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(200).send(html);
+    const statusCode = data.statusCode || data.status_code;
+    if (statusCode === 10202 || statusCode === 10221) return res.status(200).json({ status: "DIE", statusCode });
+    if (statusCode !== 0) return res.status(200).json({ status: "UNKNOWN", statusCode, msg: data.statusMsg });
+
+    const user = data.userInfo?.user;
+    const stats = data.userInfo?.stats;
+    if (!user) return res.status(200).json({ status: "DIE", reason: "no user in response" });
+
+    return res.status(200).json({
+      status: "LIVE",
+      id: user.id,
+      username: user.uniqueId,
+      nickname: user.nickname,
+      avatar: user.avatarLarger || user.avatarMedium || user.avatarThumb,
+      private: user.privateAccount || false,
+      followers: stats?.followerCount ?? 0,
+      following: stats?.followingCount ?? 0,
+      likes: stats?.heartCount ?? 0,
+      videos: stats?.videoCount ?? 0,
+      friends: stats?.friendCount ?? 0,
+    });
 
   } catch (err) {
-    console.error("Error:", err.message);
     return res.status(503).json({ error: err.message });
   }
 };
+```
+
+→ **Commit changes**
+
+---
+
+## 2. Tải `bot.py` mới về thay file cũ
+
+Sau khi Vercel deploy xong (~1 phút), test link:
+```
+https://tiktokserver.vercel.app/tiktok?input=charlidamelio
